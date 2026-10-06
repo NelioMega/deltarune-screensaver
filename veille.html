@@ -1,0 +1,1248 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Veille Monde Sombre</title>
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; cursor: none; }
+  canvas { position: fixed; left: 0; top: 0; image-rendering: pixelated; image-rendering: crisp-edges; }
+  .box {
+    position: fixed; box-sizing: border-box;
+    background: #000; color: #fff; border: 4px solid #fff;
+    box-shadow: 0 0 0 4px #000;
+    font-family: 'Press Start 2P', 'Courier New', monospace;
+    opacity: 0; transition: opacity 1.2s;
+  }
+  .box.cache { visibility: hidden; }
+  #dlg {
+    left: 50%; bottom: 6vh; transform: translateX(-50%);
+    width: min(86vw, 980px); min-height: 136px; padding: 28px 32px 28px 72px;
+    font-size: clamp(14px, 1.5vw, 22px); line-height: 1.9;
+  }
+  #dlg::before { content: "*"; position: absolute; left: 34px; top: 28px; }
+  #save { padding: 20px 26px; font-size: clamp(11px, 1vw, 15px); line-height: 2.2; min-width: 420px; }
+  #save .row { display: flex; justify-content: space-between; gap: 2.5em; }
+  #save .time { font-size: 1.9em; line-height: 1.6; }
+  #batt { display: none; align-items: center; }
+  #batt .barre { flex: 1; height: 0.9em; background: #800000; margin: 0 1em; }
+  #batt .barre i { display: block; height: 100%; background: #ffff00; }
+  #batt.faible .barre i { background: #ff2020; animation: clignote 1s steps(2) infinite; }
+  #batt.charge .barre i { background: #40ff60; }
+  @keyframes clignote { 50% { opacity: 0.3; } }
+  .y { color: #ffff00; }
+  #fondu { position: fixed; inset: 0; background: #000; opacity: 1; transition: opacity 1.2s; pointer-events: none; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div id="save" class="box">
+  <div class="row"><span>KRIS</span><span>LV 1</span><span class="time" id="clock">00:00</span></div>
+  <div class="row"><span class="y" id="lieu">Monde Sombre</span><span id="date"></span></div>
+  <div class="row" id="batt"><span>PV</span><span class="barre"><i id="battBarre"></i></span><span id="battTxt">--%</span></div>
+</div>
+<div id="dlg" class="box"><span id="txt"></span></div>
+<div id="fondu"></div>
+
+<script>
+// Paramètres d'URL utiles pour tester : ?scene=combat  ?duree=60 (secondes par scène)
+const params = new URLSearchParams(location.search);
+const DUREE_SCENE = (+params.get('duree') || 180) * 1000;
+
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d');
+const saveEl = document.getElementById('save');
+const dlgEl = document.getElementById('dlg');
+const txtEl = document.getElementById('txt');
+const fonduEl = document.getElementById('fondu');
+const rand = (a, b) => a + Math.random() * (b - a);
+const pick = arr => arr[Math.floor(Math.random() * arr.length)];
+const PIXEL_FONT = '8px "Press Start 2P", monospace';
+
+// ---------- Rendu basse résolution, mis à l'échelle en pixels nets ----------
+let S, W, H;
+function resize() {
+  S = Math.max(2, Math.round(innerHeight / 240));
+  W = Math.ceil(innerWidth / S);
+  H = Math.ceil(innerHeight / S);
+  cv.width = W; cv.height = H;
+  cv.style.width = W * S + 'px';
+  cv.style.height = H * S + 'px';
+  ctx.imageSmoothingEnabled = false;
+  if (scene && scene.init) { scene.init(); if (tFige !== null) rechauffer(); }
+}
+
+// ---------- Sprites ----------
+const SPR = {
+  heart: [
+    '.XXX...XXX.',
+    'XXXXX.XXXXX',
+    'XXXXXXXXXXX',
+    'XXXXXXXXXXX',
+    '.XXXXXXXXX.',
+    '..XXXXXXX..',
+    '...XXXXX...',
+    '....XXX....',
+    '.....X.....',
+  ],
+  spade: [
+    '....X....',
+    '...XXX...',
+    '..XXXXX..',
+    '.XXXXXXX.',
+    'XXXXXXXXX',
+    'XXXXXXXXX',
+    '.XX.X.XX.',
+    '....X....',
+    '...XXX...',
+  ],
+  club: [
+    '...XXX...',
+    '..XXXXX..',
+    '...XXX...',
+    'XXX.X.XXX',
+    'XXXXXXXXX',
+    'XXX.X.XXX',
+    '....X....',
+    '...XXX...',
+    '.........',
+  ],
+  diamond: [
+    '....X....',
+    '...XXX...',
+    '..XXXXX..',
+    '.XXXXXXX.',
+    'XXXXXXXXX',
+    '.XXXXXXX.',
+    '..XXXXX..',
+    '...XXX...',
+    '....X....',
+  ],
+  suitHeart: [
+    '.XX...XX.',
+    'XXXX.XXXX',
+    'XXXXXXXXX',
+    'XXXXXXXXX',
+    '.XXXXXXX.',
+    '..XXXXX..',
+    '...XXX...',
+    '....X....',
+    '.........',
+  ],
+  mini: [
+    '.X.',
+    'XXX',
+    '.X.',
+  ],
+};
+function sprite(rows, x, y, color, sc = 1) {
+  ctx.fillStyle = color;
+  x = Math.round(x); y = Math.round(y);
+  for (let r = 0; r < rows.length; r++)
+    for (let c = 0; c < rows[r].length; c++)
+      if (rows[r][c] === 'X') ctx.fillRect(x + c * sc, y + r * sc, sc, sc);
+}
+
+// ---------- Éléments communs ----------
+function grid(t, cell, vx, vy, color) {
+  ctx.fillStyle = color;
+  const ox = ((t * vx) % cell + cell) % cell;
+  const oy = ((t * vy) % cell + cell) % cell;
+  for (let x = ox - cell; x < W; x += cell) ctx.fillRect(Math.round(x), 0, 1, H);
+  for (let y = oy - cell; y < H; y += cell) ctx.fillRect(0, Math.round(y), W, 1);
+}
+
+// L'âme qui rebondit sur les bords, avec une traînée
+const soul = { x: 40, y: 40, vx: 26, vy: 19, trail: [], tt: 0 };
+function bounceSoul(t, dt) {
+  soul.x += soul.vx * dt; soul.y += soul.vy * dt;
+  if (soul.x < 0) { soul.x = 0; soul.vx = Math.abs(soul.vx); }
+  if (soul.x > W - 11) { soul.x = W - 11; soul.vx = -Math.abs(soul.vx); }
+  if (soul.y < 0) { soul.y = 0; soul.vy = Math.abs(soul.vy); }
+  if (soul.y > H - 9) { soul.y = H - 9; soul.vy = -Math.abs(soul.vy); }
+  soul.tt += dt;
+  if (soul.tt > 0.07) { soul.tt = 0; soul.trail.push({ x: soul.x, y: soul.y }); if (soul.trail.length > 6) soul.trail.shift(); }
+  soul.trail.forEach((p, i) => sprite(SPR.heart, p.x, p.y, `rgba(255,0,0,${(i + 1) / 20})`));
+  sprite(SPR.heart, soul.x, soul.y + Math.sin(t * 4) * 0.8, '#ff0000');
+}
+
+// Petites étoiles qui tombent
+function makeStars(density, color) {
+  const mk = () => ({ x: rand(0, W), y: -5, vy: rand(4, 12), sw: rand(0.5, 1.5), ph: rand(0, 6.28), big: Math.random() < .25 });
+  const list = Array.from({ length: Math.ceil(W * H / density) }, mk);
+  list.forEach(s => s.y = rand(0, H));
+  return (t, dt) => {
+    for (const s of list) {
+      s.y += s.vy * dt;
+      s.x += Math.sin(t * s.sw + s.ph) * 6 * dt;
+      if (s.y > H + 5) Object.assign(s, mk());
+      ctx.fillStyle = color(0.45 + 0.55 * Math.abs(Math.sin(t * 2 + s.ph)));
+      const x = Math.round(s.x), y = Math.round(s.y);
+      ctx.fillRect(x, y - 1, 1, 3); ctx.fillRect(x - 1, y, 3, 1);
+      if (s.big) { ctx.fillRect(x, y - 2, 1, 5); ctx.fillRect(x - 2, y, 5, 1); }
+    }
+  };
+}
+
+// Point de sauvegarde (étoile jaune qui tourne) à côté de la boîte de sauvegarde
+function savePoint(t) {
+  if (saveEl.classList.contains('cache')) return;
+  const op = parseFloat(getComputedStyle(saveEl).opacity);
+  if (op <= 0.01) return;
+  const r = saveEl.getBoundingClientRect();
+  let x = r.left / S - 14;
+  if (x < 8) x = r.right / S + 14;
+  const y = Math.round((r.top + r.height / 2) / S);
+  x = Math.round(x);
+  const R = 5, h = Math.max(1, Math.round(R * Math.abs(Math.cos(t * 3))));
+  ctx.globalAlpha = op;
+  ctx.fillStyle = '#ffff00';
+  ctx.fillRect(x, y - R, 1, 2 * R + 1);
+  ctx.fillRect(x - h, y, 2 * h + 1, 1);
+  ctx.fillRect(x - 1, y - 1, 3, 3);
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(x, y, 1, 1);
+  ctx.globalAlpha = 1;
+}
+
+// =====================================================================
+//  SCÈNES
+// =====================================================================
+const SCENES = {};
+
+// ---------- 1. La fontaine de ténèbres ----------
+SCENES.fontaine = {
+  lieu: 'Fontaine Sombre',
+  lines: [
+    "Une fontaine de ténèbres jaillit au milieu de ton écran. C'est normal. Probablement.",
+    "La fontaine murmure quelque chose. Ça ressemble à « mets à jour tes pilotes ».",
+  ],
+  init() {
+    this.wisps = Array.from({ length: Math.ceil(H / 5) }, () => ({
+      y: rand(0, H), ph: rand(0, 6.28), w: rand(3, 14), sp: rand(18, 45), h: Math.random() < .3 ? 2 : 1,
+    }));
+    this.stars = makeStars(2600, a => `rgba(210,235,255,${a})`);
+  },
+  draw(t, dt) {
+    const pulse = 0.35 + Math.sin(t * 0.8) * 0.12;
+    grid(t, 40, 9, 9, `rgba(150,40,170,${pulse})`);
+    grid(t + 13, 40, -6, 11, `rgba(90,20,130,${pulse * 0.9})`);
+    const cx = W / 2, fw = 30;
+    const g = ctx.createLinearGradient(cx - 70, 0, cx + 70, 0);
+    g.addColorStop(0, 'rgba(255,255,255,0)');
+    g.addColorStop(.5, `rgba(255,255,255,${0.10 + Math.sin(t * 1.3) * 0.03})`);
+    g.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = g; ctx.fillRect(cx - 70, 0, 140, H);
+    for (let y = 0; y < H; y++) {
+      const w = fw / 2 + Math.sin(y * 0.07 - t * 3) * 2 + Math.sin(y * 0.023 + t) * 2;
+      const xl = Math.round(cx - w), xr = Math.round(cx + w);
+      ctx.fillStyle = '#000'; ctx.fillRect(xl, y, xr - xl, 1);
+      ctx.fillStyle = '#fff'; ctx.fillRect(xl - 1, y, 1, 1); ctx.fillRect(xr, y, 1, 1);
+    }
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    for (const p of this.wisps) {
+      p.y -= p.sp * dt;
+      if (p.y < -4) { p.y = H + rand(0, 20); p.w = rand(3, 14); p.ph = rand(0, 6.28); }
+      const room = fw / 2 - p.w / 2 - 3;
+      const x = cx + Math.sin(t * 1.7 + p.ph + p.y * 0.03) * room - p.w / 2;
+      ctx.fillRect(Math.round(x), Math.round(p.y), Math.round(p.w), p.h);
+    }
+    this.stars(t, dt);
+    savePoint(t);
+    bounceSoul(t, dt);
+  },
+};
+
+// ---------- 2. Combat : l'âme esquive toute seule dans la boîte ----------
+SCENES.combat = {
+  lieu: 'En combat',
+  noSave: true,
+  lines: [
+    "Un ennemi sauvage apparaît ! Il a l'air... endormi.",
+    "Ton âme esquive toute seule. Elle a de l'entraînement.",
+    "Tu tentes de PARLER au fond d'écran. Il ne répond pas.",
+    "L'équipe se tient prête. Personne ne sait contre quoi.",
+  ],
+  init() {
+    this.bw = this.bh = Math.round(Math.min(120, H * 0.42));
+    this.bx = Math.round((W - this.bw) / 2);
+    this.by = Math.round((H - this.bh) / 2 + 6);
+    this.s = { x: this.bx + this.bw / 2, y: this.by + this.bh / 2, vx: 0, vy: 0, inv: 0 };
+    this.bullets = []; this.popups = []; this.spawn = 0; this.tp = 0;
+    this.party = [
+      { name: 'KRIS', color: '#00c8ff', hp: 90, max: 90 },
+      { name: 'SUSIE', color: '#ff40c0', hp: 110, max: 110 },
+      { name: 'RALSEI', color: '#40ff60', hp: 70, max: 70 },
+    ];
+  },
+  draw(t, dt) {
+    const { bx, by, bw, bh, s } = this;
+    grid(t, 40, 9, 9, 'rgba(150,40,170,0.35)');
+    grid(t + 13, 40, -6, 11, 'rgba(90,20,130,0.3)');
+
+    // Motifs d'attaque qui changent toutes les 6 secondes
+    const motif = Math.floor(t / 6) % 3;
+    this.spawn -= dt;
+    if (this.spawn <= 0) {
+      if (motif === 0) {           // pluie de diamants
+        this.bullets.push({ x: bx + rand(0, bw), y: by - 10, vx: 0, vy: rand(45, 70), spr: SPR.diamond, c: '#ff6080' });
+        this.spawn = 0.18;
+      } else if (motif === 1) {    // piques sur les côtés
+        const g = Math.random() < .5;
+        this.bullets.push({ x: g ? bx - 10 : bx + bw, y: by + rand(0, bh), vx: g ? 55 : -55, vy: 0, spr: SPR.spade, c: '#c0c0ff' });
+        this.spawn = 0.25;
+      } else {                     // éventail depuis le haut
+        const ox = bx + bw / 2 + Math.sin(t) * bw * 0.3;
+        for (let i = -3; i <= 3; i++) {
+          const a = Math.PI / 2 + i * 0.28;
+          this.bullets.push({ x: ox, y: by - 6, vx: Math.cos(a) * 50, vy: Math.sin(a) * 50, spr: SPR.mini, c: '#ffffff' });
+        }
+        this.spawn = 1.1;
+      }
+    }
+
+    // IA de l'âme : fuit les projectiles proches, revient doucement vers le centre
+    let fx = (bx + bw / 2 + Math.sin(t * 0.7) * bw * 0.25 - s.x) * 0.6;
+    let fy = (by + bh / 2 + Math.cos(t * 0.9) * bh * 0.25 - s.y) * 0.6;
+    for (const b of this.bullets) {
+      const dx = s.x - (b.x + 4), dy = s.y - (b.y + 4), d2 = dx * dx + dy * dy;
+      if (d2 < 900) { fx += dx / d2 * 2600; fy += dy / d2 * 2600; }
+      if (d2 < 200 && !b.graze) { b.graze = true; this.tp = Math.min(100, this.tp + 2); }
+    }
+    s.vx += (fx - s.vx) * Math.min(1, dt * 6); s.vy += (fy - s.vy) * Math.min(1, dt * 6);
+    const sp = Math.hypot(s.vx, s.vy), max = 75;
+    if (sp > max) { s.vx *= max / sp; s.vy *= max / sp; }
+    s.x = Math.max(bx + 6, Math.min(bx + bw - 6, s.x + s.vx * dt));
+    s.y = Math.max(by + 5, Math.min(by + bh - 5, s.y + s.vy * dt));
+    s.inv = Math.max(0, s.inv - dt);
+
+    // Boîte de combat
+    ctx.fillStyle = '#000'; ctx.fillRect(bx, by, bw, bh);
+    ctx.save(); ctx.beginPath(); ctx.rect(bx, by, bw, bh); ctx.clip();
+    this.bullets = this.bullets.filter(b => {
+      b.x += b.vx * dt; b.y += b.vy * dt;
+      const w = b.spr[0].length;
+      if (!s.inv && Math.abs(b.x + w / 2 - s.x) < 4 && Math.abs(b.y + w / 2 - s.y) < 4) {
+        s.inv = 1.2;
+        const m = pick(this.party), dmg = Math.round(rand(6, 15));
+        m.hp -= dmg;
+        this.popups.push({ txt: String(dmg), x: s.x, y: s.y - 8, life: 1, c: '#ffffff' });
+        if (m.hp < m.max * 0.3) {
+          m.hp = m.max;
+          this.popups.push({ txt: 'SOIN', x: s.x + 10, y: s.y - 18, life: 1.4, c: '#40ff60' });
+        }
+        return false;
+      }
+      sprite(b.spr, b.x, b.y, b.c);
+      return b.x > bx - 20 && b.x < bx + bw + 20 && b.y < by + bh + 20 && b.y > by - 30;
+    });
+    if (!(s.inv > 0 && Math.floor(t * 12) % 2)) sprite(SPR.heart, s.x - 5, s.y - 4, '#ff0000');
+    ctx.restore();
+    ctx.fillStyle = '#00c000';
+    ctx.fillRect(bx - 2, by - 2, bw + 4, 2); ctx.fillRect(bx - 2, by + bh, bw + 4, 2);
+    ctx.fillRect(bx - 2, by, 2, bh); ctx.fillRect(bx + bw, by, 2, bh);
+
+    // Jauge TP
+    this.tp = Math.max(0, this.tp - dt * 1.5);
+    const tx = bx - 26, th = bh;
+    ctx.fillStyle = '#401000'; ctx.fillRect(tx, by, 8, th);
+    ctx.fillStyle = this.tp >= 100 ? '#ffd040' : '#ff8000';
+    const fh = Math.round(th * this.tp / 100); ctx.fillRect(tx, by + th - fh, 8, fh);
+    ctx.font = PIXEL_FONT; ctx.fillStyle = '#ff8000'; ctx.fillText('TP', tx - 4, by - 6);
+
+    // Panneaux de l'équipe en haut
+    const pw = Math.min(110, Math.floor((W - 24) / 3)), px0 = Math.round((W - pw * 3 - 8) / 2);
+    this.party.forEach((m, i) => {
+      const px = px0 + i * (pw + 4), py = 6;
+      ctx.fillStyle = '#000'; ctx.fillRect(px, py, pw, 26);
+      ctx.fillStyle = m.color;
+      ctx.fillRect(px, py, pw, 1); ctx.fillRect(px, py + 25, pw, 1);
+      ctx.fillRect(px, py, 1, 26); ctx.fillRect(px + pw - 1, py, 1, 26);
+      ctx.fillText(m.name, px + 5, py + 12);
+      if (i === 0 && batterie) {   // la batterie du PC s'affiche sur le panneau de KRIS
+        const txt = batterie.niveau + '%';
+        ctx.fillStyle = batterie.niveau <= 20 ? '#ff2020' : '#ffff00';
+        ctx.fillText(txt, px + pw - 5 - ctx.measureText(txt).width, py + 12);
+        ctx.fillStyle = m.color;
+      }
+      const hw = pw - 10;
+      ctx.fillStyle = '#800000'; ctx.fillRect(px + 5, py + 17, hw, 4);
+      ctx.fillStyle = m.color; ctx.fillRect(px + 5, py + 17, Math.round(hw * m.hp / m.max), 4);
+    });
+
+    // Chiffres de dégâts
+    this.popups = this.popups.filter(p => {
+      p.life -= dt; p.y -= 12 * dt;
+      ctx.globalAlpha = Math.max(0, Math.min(1, p.life * 2));
+      ctx.fillStyle = p.c; ctx.fillText(p.txt, p.x, p.y);
+      ctx.globalAlpha = 1;
+      return p.life > 0;
+    });
+  },
+};
+
+// ---------- 3. Le carrousel du chaos ----------
+SCENES.chaos = {
+  lieu: 'Ch.1 Carrousel',
+  lines: [
+    "Le carrousel tourne. Tu as un peu le tournis.",
+    "Quelqu'un rit au loin. Ça ne présage rien de bon.",
+    "LES CARTES DANSENT ! LES CARTES DANSENT !",
+    "Ton écran est désormais LIBRE. Libre de faire n'importe quoi.",
+  ],
+  init() {
+    this.img = ctx.createImageData(W, H);
+    this.buf = new Uint32Array(this.img.data.buffer);
+    this.ang = new Float32Array(W * H);
+    this.lr = new Float32Array(W * H);
+    this.fade = new Float32Array(W * H);
+    const cx = W / 2, cy = H / 2, rmax = Math.hypot(cx, cy);
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const i = y * W + x, dx = x - cx, dy = y - cy, r = Math.hypot(dx, dy) + 1;
+      this.ang[i] = Math.atan2(dy, dx) / (Math.PI * 2);
+      this.lr[i] = Math.log(r);
+      this.fade[i] = Math.min(1, r / rmax * 1.4);
+    }
+    this.bullets = []; this.spawn = 0;
+  },
+  draw(t, dt) {
+    // Spirale de fond (couleurs en ABGR little-endian)
+    const { buf, ang, lr, fade } = this;
+    for (let i = 0; i < buf.length; i++) {
+      const k = ang[i] * 6 + lr[i] * 2.2 - t * 0.5;
+      const on = (Math.floor(k * 2) & 1) === 0;
+      const f = fade[i];
+      const r = on ? 70 * f : 20 * f, g = on ? 10 * f : 0, b = on ? 90 * f : 30 * f;
+      buf[i] = 0xff000000 | (b << 16) | (g << 8) | r;
+    }
+    ctx.putImageData(this.img, 0, 0);
+
+    const cx = W / 2, cy = H / 2;
+    // Balles en spirale
+    this.spawn -= dt;
+    if (this.spawn <= 0) {
+      for (const off of [0, Math.PI]) {
+        const a = t * 2.3 + off;
+        this.bullets.push({ x: cx, y: cy, vx: Math.cos(a) * 45, vy: Math.sin(a) * 45 });
+      }
+      this.spawn = 0.12;
+    }
+    this.bullets = this.bullets.filter(b => {
+      b.x += b.vx * dt; b.y += b.vy * dt;
+      sprite(SPR.mini, b.x - 1, b.y - 1, '#ffffff');
+      return b.x > -5 && b.x < W + 5 && b.y > -5 && b.y < H + 5;
+    });
+
+    // Anneaux de cartes
+    const suits = [[SPR.spade, '#b0b0ff'], [SPR.suitHeart, '#ff4070'], [SPR.club, '#b0b0ff'], [SPR.diamond, '#ff4070']];
+    const R1 = Math.min(W, H) * 0.36, R2 = Math.min(W, H) * 0.18;
+    for (let i = 0; i < 8; i++) {
+      const a = t * 0.7 + i * Math.PI / 4;
+      const [spr, c] = suits[i % 4];
+      const bob = Math.sin(t * 3 + i) * 3;
+      sprite(spr, cx + Math.cos(a) * R1 - 9, cy + Math.sin(a) * R1 * 0.8 - 9 + bob, c, 2);
+    }
+    for (let i = 0; i < 4; i++) {
+      const a = -t * 1.3 + i * Math.PI / 2;
+      const [spr, c] = suits[(i + 1) % 4];
+      sprite(spr, cx + Math.cos(a) * R2 - 4, cy + Math.sin(a) * R2 - 4, c);
+    }
+    savePoint(t);
+    bounceSoul(t, dt);
+  },
+};
+
+// ---------- 4. La ville néon ----------
+SCENES.ville = {
+  lieu: 'Ch.2 Ville Cyber',
+  lines: [
+    "La ville clignote. Quelqu'un a oublié d'éteindre les néons.",
+    "La pluie tombe en pixels. C'est très rafraîchissant.",
+    "Une pub géante te promet une affaire en [OR] pour seulement [1] clic.",
+    "Les voitures roulent sans conducteur. Comme ton PC en ce moment.",
+  ],
+  init() {
+    const P = ['#00e5ff', '#ff3df0', '#ffe14d'];
+    this.layers = [
+      { sp: 6, col: '#170d33', min: .30, max: .62, w: [18, 40], win: 0.10, b: [], end: 0 },
+      { sp: 14, col: '#21134a', min: .40, max: .75, w: [16, 34], win: 0.22, b: [], end: 0 },
+      { sp: 30, col: '#0b0819', min: .45, max: .85, w: [22, 46], win: 0.35, b: [], end: 0, neon: true },
+    ];
+    for (const L of this.layers) { L.end = -20; L.b = []; L.pal = P; }
+    this.rain = Array.from({ length: Math.ceil(W / 4) }, () => ({ x: rand(0, W), y: rand(0, H), v: rand(120, 180) }));
+    this.sky = Array.from({ length: 40 }, () => [Math.random() * W, Math.random() * H * 0.5, Math.random() * 6]);
+  },
+  draw(t, dt) {
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, '#05030f'); g.addColorStop(1, '#2a0a3a');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+    for (const [x, y, p] of this.sky) {
+      ctx.fillStyle = `rgba(255,255,255,${0.3 + 0.3 * Math.sin(t * 2 + p)})`;
+      ctx.fillRect(Math.round(x), Math.round(y), 1, 1);
+    }
+    // Lune
+    const mx = W * 0.8, my = H * 0.18, mr = Math.min(W, H) * 0.08;
+    ctx.fillStyle = '#c8f4ff';
+    for (let y = -mr; y <= mr; y++) {
+      const hw = Math.round(Math.sqrt(mr * mr - y * y));
+      ctx.fillRect(Math.round(mx - hw), Math.round(my + y), hw * 2, 1);
+    }
+    const ground = H - 14;
+    for (const L of this.layers) {
+      const off = t * L.sp;
+      while (L.end < off + W + 50) {
+        const w = Math.round(rand(...L.w));
+        L.b.push({ x: L.end, w, h: Math.round(rand(L.min, L.max) * ground), seed: Math.random() * 1000, c: pick(L.pal), sign: L.neon && Math.random() < .35 });
+        L.end += w + Math.round(rand(1, 6));
+      }
+      L.b = L.b.filter(b => b.x + b.w > off - 10);
+      for (const b of L.b) {
+        const x = Math.round(b.x - off), y = ground - b.h;
+        ctx.fillStyle = L.col; ctx.fillRect(x, y, b.w, b.h);
+        // Fenêtres
+        for (let wy = y + 4; wy < ground - 4; wy += 5) for (let wx = x + 3; wx < x + b.w - 3; wx += 4) {
+          const hsh = Math.abs(Math.sin(b.seed + wx * 12.99 + wy * 78.23) * 43758.5) % 1;
+          let lit = hsh < L.win;
+          if (hsh < 0.015) lit = Math.floor(t * 3 + b.seed) % 2 === 0;
+          if (lit) { ctx.fillStyle = b.c; ctx.globalAlpha = L.win * 2.2; ctx.fillRect(wx, wy, 2, 2); ctx.globalAlpha = 1; }
+        }
+        // Enseigne néon qui clignote
+        if (b.sign && Math.sin(t * 4 + b.seed) > -0.6) {
+          ctx.fillStyle = b.c;
+          const sx = x + 4, sy = y + 6, sw = Math.min(14, b.w - 8);
+          ctx.fillRect(sx, sy, sw, 1); ctx.fillRect(sx, sy + 6, sw, 1);
+          ctx.fillRect(sx, sy, 1, 7); ctx.fillRect(sx + sw - 1, sy, 1, 7);
+          ctx.fillRect(sx + 3, sy + 3, sw - 6, 1);
+        }
+      }
+    }
+    // Route
+    ctx.fillStyle = '#05040c'; ctx.fillRect(0, ground, W, H - ground);
+    ctx.fillStyle = '#00e5ff'; ctx.fillRect(0, ground, W, 1);
+    ctx.fillStyle = '#ff3df0';
+    for (let x = -((t * 60) % 20); x < W; x += 20) ctx.fillRect(Math.round(x), ground + 7, 8, 1);
+    // Pluie
+    ctx.fillStyle = 'rgba(120,200,255,0.45)';
+    for (const d of this.rain) {
+      d.y += d.v * dt; d.x -= d.v * 0.3 * dt;
+      if (d.y > H) { d.y = -5; d.x = rand(0, W + 40); }
+      for (let k = 0; k < 4; k++) ctx.fillRect(Math.round(d.x + k * 0.3), Math.round(d.y - k), 1, 1);
+    }
+    savePoint(t);
+    bounceSoul(t, dt);
+  },
+};
+
+// ---------- 5. La plaine aux arbres-bonbons ----------
+SCENES.plaine = {
+  lieu: 'Ch.1 Plaine',
+  lines: [
+    "Les arbres sentent la barbe à papa.",
+    "Le vent souffle sur la plaine. Tu entends une musique pleine d'espoir.",
+    "Une feuille rouge se pose sur ton écran. Elle repart aussitôt.",
+    "Au loin, un château de cartes se dresse. Il a l'air fragile.",
+  ],
+  init() {
+    this.leaves = Array.from({ length: Math.ceil(W / 10) }, () => ({ x: rand(0, W), y: rand(0, H), vx: rand(-25, -12), vy: rand(6, 14), ph: rand(0, 6.28) }));
+    this.sky = Array.from({ length: 50 }, () => [Math.random() * W, Math.random() * H * 0.45, Math.random() * 6]);
+  },
+  draw(t, dt) {
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, '#12000c'); g.addColorStop(0.6, '#4a0c2a'); g.addColorStop(1, '#2a0420');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+    for (const [x, y, p] of this.sky) {
+      ctx.fillStyle = `rgba(255,220,240,${0.25 + 0.25 * Math.sin(t * 1.5 + p)})`;
+      ctx.fillRect(Math.round(x), Math.round(y), 1, 1);
+    }
+    // Château de cartes au loin
+    const cx = Math.round(W * 0.7 - (t * 2) % (W * 1.4) + W * 0.7);
+    ctx.fillStyle = '#2a0630';
+    ctx.fillRect(cx, Math.round(H * 0.22), 18, Math.round(H * 0.3));
+    ctx.fillRect(cx - 10, Math.round(H * 0.32), 38, Math.round(H * 0.2));
+    sprite(SPR.spade, cx + 5, Math.round(H * 0.22) - 10, '#2a0630');
+    // Falaises et collines en parallaxe
+    const ridge = (sp, base, a1, f1, a2, f2, col) => {
+      const off = t * sp;
+      ctx.fillStyle = col;
+      for (let x = 0; x < W; x++) {
+        const X = x + off;
+        const h = Math.round(H * base + Math.sin(X * f1) * a1 + Math.sin(X * f2) * a2);
+        ctx.fillRect(x, h, 1, H - h);
+      }
+    };
+    ridge(5, 0.50, 14, 0.013, 8, 0.031, '#3b0d3f');
+    ridge(14, 0.64, 10, 0.02, 4, 0.05, '#5b1a5e');
+    // Sol à damier
+    const gy = Math.round(H * 0.8), off = t * 30;
+    for (let x = 0; x < W; x += 1) {
+      const c = Math.floor((x + off) / 12) % 2;
+      ctx.fillStyle = c ? '#2a0b30' : '#36103d';
+      ctx.fillRect(x, gy, 1, H - gy);
+    }
+    ctx.fillStyle = '#7a2a7f'; ctx.fillRect(0, gy, W, 1);
+    // Arbres-bonbons
+    const blob = (x, y, r, col) => {
+      ctx.fillStyle = col;
+      for (let dy = -r; dy <= r; dy++) {
+        const hw = Math.round(Math.sqrt(r * r - dy * dy));
+        ctx.fillRect(Math.round(x - hw), Math.round(y + dy), hw * 2, 1);
+      }
+    };
+    const spacing = 70;
+    for (let k = Math.floor(off / spacing) - 1; k < (off + W) / spacing + 1; k++) {
+      const s = Math.abs(Math.sin(k * 91.7)) ;
+      const x = k * spacing - off + s * 30;
+      const r = 9 + Math.round(s * 6);
+      const ty = gy - 18 - Math.round(s * 8);
+      ctx.fillStyle = '#2b1020'; ctx.fillRect(Math.round(x) - 1, ty, 3, gy - ty);
+      const sway = Math.sin(t * 1.5 + k) * 1.2;
+      blob(x + sway, ty - r + 3, r, '#b01848');
+      blob(x + sway - r * 0.45, ty - r + 5, r * 0.6, '#b01848');
+      blob(x + sway + r * 0.45, ty - r + 5, r * 0.6, '#b01848');
+      blob(x + sway - 2, ty - r, r * 0.45, '#ff5f95');
+    }
+    // Feuilles qui volent
+    ctx.fillStyle = '#ff4d80';
+    for (const l of this.leaves) {
+      l.x += l.vx * dt; l.y += l.vy * dt + Math.sin(t * 2 + l.ph) * 8 * dt;
+      if (l.x < -4 || l.y > H) { l.x = W + rand(0, 20); l.y = rand(-10, H * 0.6); }
+      ctx.fillRect(Math.round(l.x), Math.round(l.y), 2, 1);
+      ctx.fillRect(Math.round(l.x) + 1, Math.round(l.y) + 1, 1, 1);
+    }
+    savePoint(t);
+    bounceSoul(t, dt);
+  },
+};
+
+// Petits outils de dessin partagés par les scènes suivantes
+function disque(x, y, r, col) {
+  ctx.fillStyle = col;
+  for (let dy = -r; dy <= r; dy++) {
+    const hw = Math.round(Math.sqrt(r * r - dy * dy));
+    ctx.fillRect(Math.round(x - hw), Math.round(y + dy), hw * 2, 1);
+  }
+}
+function degrade(haut, bas, milieu) {
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, haut); if (milieu) g.addColorStop(0.55, milieu); g.addColorStop(1, bas);
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+}
+function texteCentre(txt, x, y, col) {
+  ctx.font = PIXEL_FONT; ctx.fillStyle = col;
+  ctx.fillText(txt, Math.round(x - ctx.measureText(txt).width / 2), Math.round(y));
+}
+
+// ---------- Ch.1 : la forêt écarlate ----------
+SCENES.foret = {
+  lieu: 'Ch.1 Forêt Écarlate',
+  lines: [
+    "Les arbres sont rouges. Les feuilles sont rouges. Même le silence a l'air rouge.",
+    "Un panneau indique « VENTE DE GÂTEAUX ». Le stand est vide.",
+    "Tu entends des gardes-cartes patrouiller au loin. Ils ne te trouveront pas.",
+  ],
+  init() {
+    this.leaves = Array.from({ length: Math.ceil(W / 8) }, () => ({ x: rand(0, W), y: rand(0, H), vx: rand(-8, 8), vy: rand(8, 16), ph: rand(0, 6.28) }));
+  },
+  draw(t, dt) {
+    degrade('#2a0010', '#14000a', '#4a0820');
+    // Rayons de lumière obliques
+    ctx.fillStyle = 'rgba(255,180,200,0.05)';
+    for (let k = 0; k < 4; k++) {
+      const x0 = ((k * W / 3 + t * 4) % (W + 120)) - 60;
+      for (let y = 0; y < H; y += 2) ctx.fillRect(Math.round(x0 + y * 0.4), y, 14 + Math.sin(t + k) * 4, 2);
+    }
+    // Troncs en parallaxe (3 couches)
+    const couches = [[5, '#3a0718', 10, 50], [12, '#55091f', 16, 70], [24, '#1c0209', 24, 95]];
+    for (const [sp, col, larg, esp] of couches) {
+      const off = t * sp;
+      for (let k = Math.floor(off / esp) - 1; k < (off + W) / esp + 1; k++) {
+        const s = Math.abs(Math.sin(k * 37.1 + sp));
+        const x = Math.round(k * esp - off + s * esp * 0.4), w = Math.round(larg * (0.7 + s * 0.5));
+        ctx.fillStyle = col; ctx.fillRect(x, 0, w, H);
+        ctx.fillStyle = 'rgba(0,0,0,0.25)'; ctx.fillRect(x + w - 2, 0, 2, H);
+        // motif losange gravé sur le tronc
+        if (sp > 10) sprite(SPR.diamond, x + w / 2 - 4, H * 0.45 + s * 30, 'rgba(255,90,140,0.35)');
+      }
+    }
+    // Feuillage en haut
+    for (let x = 0; x < W; x += 6) {
+      const h = 18 + Math.sin(x * 0.09 + t * 0.5) * 5 + Math.sin(x * 0.23) * 3;
+      disque(x, h * 0.4, Math.round(h * 0.6), '#8a0f2a');
+      disque(x - 2, h * 0.3, Math.round(h * 0.3), '#c4224a');
+    }
+    // Buissons et brume au sol
+    const off = t * 30;
+    for (let x = 0; x < W; x += 8) {
+      const X = x + (off % 8);
+      disque(W - X, H - 4 + Math.sin((x + off) * 0.1) * 2, 9, '#0f0005');
+    }
+    ctx.fillStyle = 'rgba(255,120,160,0.06)';
+    for (let i = 0; i < 4; i++) ctx.fillRect(0, H - 30 + i * 6 + Math.sin(t + i) * 2, W, 6);
+    // Feuilles
+    ctx.fillStyle = '#ff3d6e';
+    for (const l of this.leaves) {
+      l.x += (l.vx + Math.sin(t * 1.5 + l.ph) * 10) * dt; l.y += l.vy * dt;
+      if (l.y > H) { l.y = -4; l.x = rand(0, W); }
+      ctx.fillRect(Math.round(l.x), Math.round(l.y), 2, 1); ctx.fillRect(Math.round(l.x), Math.round(l.y) + 1, 1, 1);
+    }
+    savePoint(t);
+    bounceSoul(t, dt);
+  },
+};
+
+// ---------- Ch.2 : la ruelle des [[BONNES AFFAIRES]] ----------
+SCENES.spam = {
+  lieu: 'Ch.2 Ruelle [[DEAL]]',
+  lines: [
+    "Une voix grésille : « HÉ TOI ! OUI, [[TOI]] ! TU VEUX UNE [[AFFAIRE EN OR]] ? »",
+    "Le téléphone sonne. Personne ne décroche. Il sonne quand même.",
+    "Des fils pendent du plafond. Tu préfères ne pas savoir à quoi ils servent.",
+    "[[OFFRE LIMITÉE]] : une veille GRATUITE pour seulement [[0 KROMER]] !",
+  ],
+  mots: ['[[BIG SHOT]]', '[KROMER]', '1-800-[[NUMERO]]', '[[LIEN BLOQUÉ]]', '$$ DEAL $$', '[[SPÉCIAL]]', 'HAHAHA', '[[AFFAIRE !]]'],
+  init() {
+    this.txt = Array.from({ length: 6 }, (_, i) => ({
+      m: this.mots[i % this.mots.length], x: rand(10, W - 80), y: rand(20, H - 20),
+      vx: rand(15, 30) * (Math.random() < .5 ? -1 : 1), vy: rand(10, 25) * (Math.random() < .5 ? -1 : 1),
+      c: ['#ffff00', '#ff40c0', '#ffffff', '#00e5ff'][i % 4],
+    }));
+    this.glitch = [];
+  },
+  draw(t, dt) {
+    // Rayures diagonales
+    ctx.fillStyle = '#0a0a12'; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = 'rgba(255,230,0,0.07)';
+    const off = (t * 10) % 24;
+    for (let y = 0; y < H; y++) for (let x = -24 + ((off + y) % 24); x < W; x += 24) ctx.fillRect(Math.round(x), y, 8, 1);
+    // Fils qui pendent
+    ctx.fillStyle = 'rgba(200,200,220,0.5)';
+    for (let k = 0; k < 7; k++) {
+      const x0 = (k + 0.5) * W / 7, len = H * (0.25 + 0.15 * Math.sin(k * 3.1));
+      for (let y = 0; y < len; y++) ctx.fillRect(Math.round(x0 + Math.sin(t * 1.2 + k) * y * 0.05), y, 1, 1);
+      ctx.fillStyle = k % 2 ? '#ff40c0' : '#ffff00';
+      ctx.fillRect(Math.round(x0 + Math.sin(t * 1.2 + k) * len * 0.05) - 1, Math.round(len), 3, 3);
+      ctx.fillStyle = 'rgba(200,200,220,0.5)';
+    }
+    // Textes qui rebondissent
+    ctx.font = PIXEL_FONT;
+    for (const o of this.txt) {
+      const w = ctx.measureText(o.m).width;
+      o.x += o.vx * dt; o.y += o.vy * dt;
+      if (o.x < 0 || o.x + w > W) { o.vx *= -1; o.x = Math.max(0, Math.min(W - w, o.x)); o.m = pick(this.mots); }
+      if (o.y < 8 || o.y > H - 2) { o.vy *= -1; o.y = Math.max(8, Math.min(H - 2, o.y)); }
+      const jit = Math.random() < 0.05 ? rand(-2, 2) : 0;
+      ctx.fillStyle = Math.floor(t * 4) % 2 ? o.c : '#ffffff';
+      ctx.fillText(o.m, Math.round(o.x + jit), Math.round(o.y));
+    }
+    // Bandes de glitch
+    if (Math.random() < 0.06) this.glitch.push({ y: rand(0, H), h: rand(2, 8), dx: rand(-12, 12), life: rand(0.05, 0.25) });
+    this.glitch = this.glitch.filter(g => {
+      g.life -= dt;
+      const y = Math.round(g.y), h = Math.round(g.h);
+      ctx.drawImage(cv, 0, y, W, h, Math.round(g.dx), y, W, h);
+      ctx.fillStyle = 'rgba(255,0,180,0.15)'; ctx.fillRect(0, y, W, h);
+      return g.life > 0;
+    });
+    // Lignes de balayage
+    ctx.fillStyle = 'rgba(0,0,0,0.25)';
+    for (let y = 0; y < H; y += 2) ctx.fillRect(0, y, W, 1);
+    savePoint(t);
+    bounceSoul(t, dt);
+  },
+};
+
+// ---------- Ch.3 : le plateau TV ----------
+SCENES.studio = {
+  lieu: 'Ch.3 Studio TV',
+  lines: [
+    "MESDAMES ET MESSIEURS ! Bienvenue dans... la VEILLE !",
+    "Le public applaudit. Tu n'as rien fait. Ils applaudissent quand même.",
+    "Restez à l'écoute ! On revient juste après cette page de pub.",
+    "L'audimat est au plus haut. Enfin, il y a toi.",
+  ],
+  init() {
+    this.confettis = Array.from({ length: Math.ceil(W / 3) }, () => ({ x: rand(0, W), y: rand(-H, H), v: rand(15, 35), c: pick(['#ffff00', '#ff40c0', '#00e5ff', '#40ff60', '#ffffff']), ph: rand(0, 6.28) }));
+  },
+  draw(t, dt) {
+    degrade('#120020', '#2a0838');
+    // Rideaux
+    const rw = Math.round(W * 0.12);
+    for (let x = 0; x < rw; x++) {
+      const c = 120 + Math.round(Math.sin(x * 0.6) * 50);
+      ctx.fillStyle = `rgb(${c},0,${Math.round(c * 0.2)})`;
+      ctx.fillRect(x, 0, 1, H); ctx.fillRect(W - 1 - x, 0, 1, H);
+    }
+    ctx.fillStyle = '#7a0010'; ctx.fillRect(0, 0, W, 10);
+    for (let x = 0; x < W; x += 10) disque(x + 5, 10, 5, '#7a0010');
+    // Projecteurs qui balaient
+    for (let k = 0; k < 3; k++) {
+      const sx = W * (0.25 + k * 0.25), a = Math.sin(t * 0.6 + k * 2) * 0.5;
+      const ex = sx + Math.tan(a) * H;
+      ctx.fillStyle = `rgba(255,255,200,0.07)`;
+      for (let y = 0; y < H; y += 1) {
+        const f = y / H, cx = sx + (ex - sx) * f, hw = 2 + f * 28;
+        ctx.fillRect(Math.round(cx - hw), y, Math.round(hw * 2), 1);
+      }
+    }
+    // Grand écran au centre
+    const tw = Math.round(Math.min(W * 0.4, 150)), th = Math.round(tw * 0.62);
+    const tx = Math.round((W - tw) / 2), ty = Math.round(H * 0.22);
+    ctx.fillStyle = '#9090a8'; ctx.fillRect(tx - 5, ty - 5, tw + 10, th + 10);
+    ctx.fillStyle = '#505068'; ctx.fillRect(tx - 3, ty - 3, tw + 6, th + 6);
+    const mode = Math.floor(t / 4) % 3;
+    if (mode === 0) {
+      const bars = ['#c0c0c0', '#c0c000', '#00c0c0', '#00c000', '#c000c0', '#c00000', '#0000c0'];
+      bars.forEach((c, i) => { ctx.fillStyle = c; ctx.fillRect(tx + Math.round(i * tw / 7), ty, Math.ceil(tw / 7), th); });
+    } else if (mode === 1) {
+      for (let y = 0; y < th; y += 2) for (let x = 0; x < tw; x += 2) {
+        const v = Math.random() * 255 | 0; ctx.fillStyle = `rgb(${v},${v},${v})`; ctx.fillRect(tx + x, ty + y, 2, 2);
+      }
+    } else {
+      ctx.fillStyle = '#000'; ctx.fillRect(tx, ty, tw, th);
+      sprite(SPR.heart, tx + tw / 2 - 11, ty + th / 2 - 14 + Math.sin(t * 3) * 2, '#ff0000', 2);
+      texteCentre('EN DIRECT', tx + tw / 2, ty + th - 8, Math.floor(t * 2) % 2 ? '#ff4040' : '#ffffff');
+    }
+    // Panneau APPLAUDISSEZ
+    if (Math.floor(t * 2) % 2) texteCentre('APPLAUDISSEZ !', W / 2, ty - 12, '#ffff00');
+    // Public
+    for (let x = 4; x < W; x += 12) {
+      const saut = Math.max(0, Math.sin(t * 6 + x * 0.7)) * 2;
+      disque(x, H - 10 - saut, 6, '#0a0010');
+      ctx.fillStyle = '#0a0010'; ctx.fillRect(x - 8, H - 6 - saut, 16, 8);
+    }
+    // Confettis
+    for (const c of this.confettis) {
+      c.y += c.v * dt; c.x += Math.sin(t * 2 + c.ph) * 10 * dt;
+      if (c.y > H) { c.y = -4; c.x = rand(0, W); }
+      ctx.fillStyle = c.c; ctx.fillRect(Math.round(c.x), Math.round(c.y), Math.sin(t * 5 + c.ph) > 0 ? 2 : 1, 2);
+    }
+    savePoint(t);
+    bounceSoul(t, dt);
+  },
+};
+
+// ---------- Ch.3 : le jeu de plateau (palette console portable) ----------
+SCENES.plateau = {
+  lieu: 'Ch.3 Jeu de Plateau',
+  lines: [
+    "Tu lances le dé. Il fait... un nombre. Bravo !",
+    "Ton pion avance tout seul. Il connaît le chemin par cœur.",
+    "Case bonus ! Tu gagnes... une pause supplémentaire.",
+  ],
+  init() {
+    const cs = Math.max(10, Math.floor(Math.min(W / 11, H / 8)));
+    this.cs = cs;
+    const cols = 8, rows = 5; this.rows = rows;
+    this.ox = Math.round((W - cols * cs) / 2); this.oy = Math.round((H - rows * cs) / 2);
+    this.cases = [];
+    for (let i = 0; i < cols; i++) this.cases.push([i, 0]);
+    for (let j = 1; j < rows; j++) this.cases.push([cols - 1, j]);
+    for (let i = cols - 2; i >= 0; i--) this.cases.push([i, rows - 1]);
+    for (let j = rows - 2; j > 0; j--) this.cases.push([0, j]);
+    this.pos = 0; this.cible = 0; this.de = 1; this.attente = 1; this.saut = 0;
+    this.nuages = Array.from({ length: 5 }, () => [rand(0, W), rand(5, H * 0.3), rand(4, 10)]);
+  },
+  draw(t, dt) {
+    const [P0, P1, P2, P3] = ['#0f380f', '#306230', '#8bac0f', '#9bbc0f'];
+    ctx.fillStyle = P3; ctx.fillRect(0, 0, W, H);
+    // Damier d'herbe
+    ctx.fillStyle = P2;
+    for (let y = 0; y < H; y += 8) for (let x = (y / 8) % 2 * 8; x < W; x += 16) ctx.fillRect(x, y, 8, 8);
+    // Nuages
+    for (const n of this.nuages) {
+      n[0] = (n[0] + n[2] * dt) % (W + 40);
+      disque(n[0] - 20, n[1], 6, P3); disque(n[0] - 12, n[1] - 3, 7, P3); disque(n[0] - 4, n[1], 5, P3);
+    }
+    // Plateau
+    const { cs, ox, oy } = this;
+    this.cases.forEach(([i, j], k) => {
+      const x = ox + i * cs, y = oy + j * cs;
+      ctx.fillStyle = P0; ctx.fillRect(x, y, cs, cs);
+      ctx.fillStyle = k % 5 === 0 ? P2 : P1; ctx.fillRect(x + 1, y + 1, cs - 2, cs - 2);
+      if (k % 5 === 0) sprite(SPR.mini, x + cs / 2 - 1, y + cs / 2 - 1, P0);
+    });
+    // Logique du dé et du pion
+    this.attente -= dt;
+    if (this.pos === this.cible && this.attente <= 0) {
+      this.de = 1 + Math.floor(Math.random() * 6);
+      this.cible = (this.pos + this.de) % this.cases.length;
+      this.attente = 0.4;
+    } else if (this.pos !== this.cible && this.attente <= 0) {
+      this.pos = (this.pos + 1) % this.cases.length; this.saut = 1;
+      this.attente = this.pos === this.cible ? 2.5 : 0.35;
+    }
+    this.saut = Math.max(0, this.saut - dt * 4);
+    const [ci, cj] = this.cases[this.pos];
+    const hop = Math.sin(this.saut * Math.PI) * 6;
+    sprite(SPR.heart, ox + ci * cs + cs / 2 - 5, oy + cj * cs + cs / 2 - 6 - hop, P0);
+    // Dé au centre
+    const dx = Math.round(W / 2 - 9), dy = Math.round(oy + this.rows * cs / 2 - 9);
+    ctx.fillStyle = P0; ctx.fillRect(dx, dy, 18, 18);
+    ctx.fillStyle = P3; ctx.fillRect(dx + 1, dy + 1, 16, 16);
+    const pts = { 1: [[1, 1]], 2: [[0, 0], [2, 2]], 3: [[0, 0], [1, 1], [2, 2]], 4: [[0, 0], [2, 0], [0, 2], [2, 2]], 5: [[0, 0], [2, 0], [1, 1], [0, 2], [2, 2]], 6: [[0, 0], [2, 0], [0, 1], [2, 1], [0, 2], [2, 2]] };
+    ctx.fillStyle = P0;
+    for (const [a, b] of pts[this.de]) ctx.fillRect(dx + 3 + a * 5, dy + 3 + b * 5, 2, 2);
+    savePoint(t);
+  },
+};
+
+// ---------- Ch.4 : le sanctuaire ----------
+SCENES.sanctuaire = {
+  lieu: 'Ch.4 Sanctuaire',
+  lines: [
+    "La lumière traverse le vitrail. Tout est calme. Presque trop.",
+    "Un orgue joue quelque part, très doucement. Ou c'est le ventilateur.",
+    "Les bancs sont vides. Tu pourrais t'asseoir. Tu es déjà assis.",
+  ],
+  init() {
+    this.motes = Array.from({ length: Math.ceil(W / 5) }, () => ({ x: rand(0, W), y: rand(0, H), v: rand(3, 9), ph: rand(0, 6.28) }));
+  },
+  draw(t, dt) {
+    degrade('#020414', '#0a1030', '#06092a');
+    const cx = W / 2, cy = H * 0.3, R = Math.min(W, H) * 0.22;
+    // Rayons de lumière depuis le vitrail
+    for (let k = -2; k <= 2; k++) {
+      const a = k * 0.18 + Math.sin(t * 0.3) * 0.03;
+      ctx.fillStyle = `rgba(160,200,255,${0.035 + 0.015 * Math.sin(t + k)})`;
+      for (let y = Math.round(cy); y < H; y++) {
+        const f = (y - cy), x = cx + Math.tan(a) * f, hw = 4 + f * 0.12;
+        ctx.fillRect(Math.round(x - hw), y, Math.round(hw * 2), 1);
+      }
+    }
+    // Colonnes
+    for (const x of [W * 0.12, W * 0.28, W * 0.72, W * 0.88]) {
+      ctx.fillStyle = '#141a3a'; ctx.fillRect(Math.round(x - 7), 0, 14, H);
+      ctx.fillStyle = '#1f2850'; ctx.fillRect(Math.round(x - 7), 0, 3, H);
+      ctx.fillStyle = '#0a0e24'; ctx.fillRect(Math.round(x + 5), 0, 2, H);
+    }
+    // Rosace qui tourne lentement
+    disque(cx, cy, Math.round(R + 4), '#1a1a2a');
+    const cols = ['#2a5cff', '#1ec8ff', '#ffd040', '#8040ff', '#2a5cff', '#ff4080'];
+    const nb = 12, rot = t * 0.08;
+    for (let anneau = 0; anneau < 3; anneau++) {
+      const r1 = R * (1 - anneau * 0.3), r0 = R * (0.7 - anneau * 0.3);
+      for (let i = 0; i < nb; i++) {
+        const a0 = rot * (anneau % 2 ? -1 : 1) + i * 2 * Math.PI / nb;
+        ctx.fillStyle = cols[(i + anneau * 2) % cols.length];
+        ctx.globalAlpha = 0.75 + 0.25 * Math.sin(t * 1.5 + i + anneau);
+        ctx.beginPath(); ctx.arc(cx, cy, r1, a0 + 0.04, a0 + 2 * Math.PI / nb - 0.04);
+        ctx.arc(cx, cy, Math.max(0, r0), a0 + 2 * Math.PI / nb - 0.04, a0 + 0.04, true); ctx.fill();
+      }
+    }
+    ctx.globalAlpha = 1;
+    disque(cx, cy, Math.round(R * 0.12), '#fff8d0');
+    // Bancs
+    for (let r = 0; r < 3; r++) {
+      const y = Math.round(H * (0.72 + r * 0.09)), w = W * (0.28 + r * 0.04);
+      ctx.fillStyle = '#05061a';
+      ctx.fillRect(Math.round(W * 0.06), y, Math.round(w), 6); ctx.fillRect(Math.round(W * 0.94 - w), y, Math.round(w), 6);
+      ctx.fillStyle = '#1f2850';
+      ctx.fillRect(Math.round(W * 0.06), y, Math.round(w), 1); ctx.fillRect(Math.round(W * 0.94 - w), y, Math.round(w), 1);
+    }
+    // Poussières lumineuses
+    for (const m of this.motes) {
+      m.y -= m.v * dt; m.x += Math.sin(t + m.ph) * 4 * dt;
+      if (m.y < -2) { m.y = H + 2; m.x = rand(0, W); }
+      ctx.fillStyle = `rgba(220,235,255,${0.3 + 0.5 * Math.abs(Math.sin(t * 1.3 + m.ph))})`;
+      ctx.fillRect(Math.round(m.x), Math.round(m.y), 1, 1);
+    }
+    savePoint(t);
+    bounceSoul(t, dt);
+  },
+};
+
+// ---------- Ch.5 : le royaume floral ----------
+SCENES.jardin = {
+  lieu: 'Ch.5 Royaume Floral',
+  lines: [
+    "Les fleurs se tournent toutes vers toi. Elles sont juste polies.",
+    "Le blé ondule sur la falaise. Ça sent le pain chaud et la terre mouillée.",
+    "Au loin, le château fleuri brille comme un bouquet géant.",
+    "Une fleur dorée te regarde. Tu fais semblant de ne pas la voir.",
+  ],
+  init() {
+    const couleurs = ['#ff7ab8', '#ffd23f', '#ff9f43', '#c78bff', '#ffffff', '#ff5d7a'];
+    this.fleurs = [];
+    for (let rang = 0; rang < 3; rang++) {
+      const n = Math.ceil(W / (14 - rang * 3));
+      for (let i = 0; i < n; i++) this.fleurs.push({
+        x: rand(0, W), rang, h: rand(10, 22) + rang * 8, c: pick(couleurs), ph: rand(0, 6.28),
+        r: 2 + rang, or: Math.random() < 0.08,
+      });
+    }
+    this.petales = Array.from({ length: Math.ceil(W / 6) }, () => ({ x: rand(0, W), y: rand(0, H), vx: rand(-20, -8), vy: rand(4, 10), ph: rand(0, 6.28), c: pick(couleurs) }));
+  },
+  draw(t, dt) {
+    degrade('#1a0b2e', '#3a1a3a', '#4a2050');
+    // Château fleuri au loin
+    const cx = W * 0.72, base = H * 0.5;
+    ctx.fillStyle = '#2a1238';
+    ctx.fillRect(Math.round(cx - 22), Math.round(base - 40), 44, 40);
+    for (const [dx, hh] of [[-26, 55], [0, 70], [26, 55]]) {
+      ctx.fillStyle = '#2a1238';
+      ctx.fillRect(Math.round(cx + dx - 5), Math.round(base - hh), 10, hh);
+      disque(cx + dx, base - hh, 7, '#ff7ab8');
+      disque(cx + dx, base - hh, 3, '#ffd23f');
+    }
+    for (let k = 0; k < 6; k++) if (Math.sin(t * 2 + k * 1.7) > 0) {
+      ctx.fillStyle = '#ffd23f'; ctx.fillRect(Math.round(cx - 16 + k * 6), Math.round(base - 26), 2, 3);
+    }
+    // Falaises avec champ de blé
+    const off = t * 6;
+    for (let x = 0; x < W; x++) {
+      const X = x + off;
+      const h = Math.round(H * 0.55 + Math.sin(X * 0.015) * 10 + Math.sin(X * 0.04) * 4);
+      ctx.fillStyle = '#5a2a4a'; ctx.fillRect(x, h, 1, H - h);
+      ctx.fillStyle = Math.sin(X * 0.3 + t * 2) > 0.2 ? '#e8b84a' : '#c9962f';
+      ctx.fillRect(x, h - 2 + Math.round(Math.sin(X * 0.7 + t * 3)), 1, 3);
+    }
+    // Sol du jardin
+    const gy = Math.round(H * 0.72);
+    ctx.fillStyle = '#2a3a1a'; ctx.fillRect(0, gy, W, H - gy);
+    ctx.fillStyle = '#3c5a24'; ctx.fillRect(0, gy, W, 1);
+    // Fleurs qui se balancent (3 rangées, du fond vers l'avant)
+    for (const f of this.fleurs) {
+      const pied = gy + 4 + f.rang * 10;
+      const sway = Math.sin(t * 1.4 + f.ph + f.x * 0.02) * (2 + f.rang);
+      const hx = f.x + sway, hy = pied - f.h;
+      ctx.fillStyle = '#4c8a2c';
+      for (let y = 0; y < f.h; y++) ctx.fillRect(Math.round(f.x + sway * (y / f.h)), Math.round(pied - y), 1, 1);
+      const c = f.or ? '#ffd700' : f.c, r = f.r;
+      disque(hx - r, hy, r, c); disque(hx + r, hy, r, c); disque(hx, hy - r, r, c); disque(hx, hy + r, r, c);
+      disque(hx, hy, Math.max(1, r - 1), f.or ? '#fff3a0' : '#ffd23f');
+    }
+    // Pétales dans le vent
+    for (const p of this.petales) {
+      p.x += p.vx * dt; p.y += (p.vy + Math.sin(t * 2 + p.ph) * 6) * dt;
+      if (p.x < -3 || p.y > H) { p.x = W + rand(0, 20); p.y = rand(-10, H * 0.7); }
+      ctx.fillStyle = p.c; ctx.fillRect(Math.round(p.x), Math.round(p.y), 2, 1);
+    }
+    savePoint(t);
+    bounceSoul(t, dt);
+  },
+};
+
+// ---------- Ch.5 : la fête du Monde Lumineux ----------
+SCENES.fete = {
+  lieu: 'Ch.5 Jour de Fête',
+  lines: [
+    "C'est jour de fête en ville ! Ton PC, lui, fait la sieste.",
+    "Un feu d'artifice éclate. Tout le monde fait « ooooh ».",
+    "Ça sent la barbe à papa et les beignets. Tu as un peu faim.",
+    "Les lanternes se balancent doucement. Personne n'est pressé ce soir.",
+  ],
+  init() {
+    this.fusees = []; this.etincelles = []; this.prochaine = 0.5;
+    this.sky = Array.from({ length: 60 }, () => [Math.random() * W, Math.random() * H * 0.6, Math.random() * 6]);
+  },
+  draw(t, dt) {
+    degrade('#05081f', '#2a1838', '#141a40');
+    for (const [x, y, p] of this.sky) {
+      ctx.fillStyle = `rgba(255,255,255,${0.25 + 0.25 * Math.sin(t * 2 + p)})`;
+      ctx.fillRect(Math.round(x), Math.round(y), 1, 1);
+    }
+    // Feux d'artifice
+    this.prochaine -= dt;
+    if (this.prochaine <= 0) {
+      this.fusees.push({ x: rand(W * 0.15, W * 0.85), y: H * 0.7, vy: -rand(70, 95), c: pick(['#ff5d7a', '#ffd23f', '#5de0ff', '#a6ff5d', '#ff9ff0', '#ffffff']) });
+      this.prochaine = rand(0.6, 1.8);
+    }
+    this.fusees = this.fusees.filter(f => {
+      f.y += f.vy * dt; f.vy += 40 * dt;
+      ctx.fillStyle = '#ffe9a0'; ctx.fillRect(Math.round(f.x), Math.round(f.y), 1, 2);
+      if (f.vy > -10) {
+        for (let i = 0; i < 28; i++) {
+          const a = i / 28 * Math.PI * 2, v = rand(25, 45);
+          this.etincelles.push({ x: f.x, y: f.y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, c: f.c, vie: rand(1, 1.6) });
+        }
+        return false;
+      }
+      return true;
+    });
+    this.etincelles = this.etincelles.filter(e => {
+      e.x += e.vx * dt; e.y += e.vy * dt; e.vy += 18 * dt; e.vx *= 0.99; e.vie -= dt;
+      ctx.globalAlpha = Math.max(0, Math.min(1, e.vie));
+      ctx.fillStyle = Math.random() < 0.1 ? '#ffffff' : e.c;
+      const taille = e.vie > 0.7 ? 2 : 1;
+      ctx.fillRect(Math.round(e.x), Math.round(e.y), taille, taille);
+      ctx.globalAlpha = 1;
+      return e.vie > 0;
+    });
+    // Toits de la ville
+    const toits = H * 0.7;
+    for (let x = 0, k = 0; x < W; k++) {
+      const w = 26 + Math.abs(Math.sin(k * 7.3)) * 22, h = 18 + Math.abs(Math.sin(k * 3.1)) * 26;
+      ctx.fillStyle = '#0c0a1e'; ctx.fillRect(Math.round(x), Math.round(toits - h), Math.round(w), H);
+      for (let i = 0; i < w / 2; i++) ctx.fillRect(Math.round(x + i), Math.round(toits - h - i * 0.5), Math.max(1, Math.round(w - i * 2)), 1);
+      if (Math.sin(k * 5.7) > 0) { ctx.fillStyle = '#ffcf6a'; ctx.fillRect(Math.round(x + w / 2 - 2), Math.round(toits - h + 6), 4, 4); }
+      x += w;
+    }
+    // Guirlandes de lanternes
+    const couleurs = ['#ff5d5d', '#ffb347', '#ffe066', '#ff7ab8'];
+    const fil = (x, g) => H * (0.18 + g * 0.16) + Math.sin(x / W * Math.PI * 3 + g) * 4 - Math.cos(x / W * Math.PI * 2) * 6;
+    for (let g = 0; g < 2; g++) {
+      ctx.fillStyle = '#3a2f58';
+      for (let x = 0; x < W; x++) ctx.fillRect(x, Math.round(fil(x, g)), 1, 1);
+      for (let k = 0; k < 12; k++) {
+        const x = (k + 0.5 + g * 0.5) * W / 12, y = fil(x, g);
+        const bal = Math.sin(t * 1.5 + k + g) * 1.5;
+        ctx.fillStyle = `rgba(255,200,120,${0.08 + 0.04 * Math.sin(t * 3 + k)})`;
+        ctx.fillRect(Math.round(x - 6 + bal), Math.round(y - 1), 12, 14);
+        ctx.fillStyle = couleurs[(k + g) % couleurs.length]; ctx.fillRect(Math.round(x - 3 + bal), Math.round(y + 2), 6, 8);
+        ctx.fillStyle = '#2a2040';
+        ctx.fillRect(Math.round(x - 2 + bal), Math.round(y + 1), 4, 1); ctx.fillRect(Math.round(x - 2 + bal), Math.round(y + 10), 4, 1);
+      }
+    }
+    // Stands de fête au premier plan
+    const sy = Math.round(H * 0.82);
+    ctx.fillStyle = '#100c20'; ctx.fillRect(0, sy, W, H - sy);
+    for (let k = 0, x = 6; x < W; k++, x += 70) {
+      ctx.fillStyle = '#1c1530'; ctx.fillRect(x, sy - 16, 46, 20);
+      for (let i = 0; i < 46; i += 6) {
+        ctx.fillStyle = (i / 6) % 2 ? '#ffffff' : (k % 2 ? '#ff5d7a' : '#5d9bff');
+        ctx.fillRect(x + i, sy - 22, 6, 6);
+      }
+      ctx.fillStyle = '#ffcf6a'; ctx.fillRect(x + 8, sy - 10, 30, 2);
+    }
+    savePoint(t);
+    bounceSoul(t, dt);
+  },
+};
+
+// =====================================================================
+//  Gestion des scènes
+// =====================================================================
+const ORDRE = Object.keys(SCENES);
+let scene = null, sceneIdx = 0;
+function setScene(nom) {
+  sceneIdx = ORDRE.indexOf(nom);
+  scene = SCENES[nom];
+  scene.init();
+  saveEl.classList.toggle('cache', !!scene.noSave);
+  document.getElementById('lieu').textContent = scene.lieu;
+}
+async function changerScene() {
+  fonduEl.style.opacity = 1;
+  await sleep(1300);
+  let suivant;
+  do { suivant = pick(ORDRE); } while (ORDRE.length > 1 && suivant === ORDRE[sceneIdx]);
+  setScene(suivant);
+  fonduEl.style.opacity = 0;
+}
+
+resize();
+setScene(ORDRE.includes(params.get('scene')) ? params.get('scene') : pick(ORDRE));
+addEventListener('resize', resize);
+setTimeout(() => { fonduEl.style.opacity = 0; }, 100);
+setInterval(changerScene, DUREE_SCENE);
+
+let tFige = null;
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+  if (tFige !== null) scene.draw(tFige, 0);   // mode capture : image figée
+  else scene.draw(now / 1000, dt);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+// ---------- Horloge façon fichier de sauvegarde (change de coin pour éviter le marquage) ----------
+const pad = n => String(n).padStart(2, '0');
+const hhmm = () => { const d = new Date(); return pad(d.getHours()) + ':' + pad(d.getMinutes()); };
+function tick() {
+  document.getElementById('clock').textContent = hhmm();
+  document.getElementById('date').textContent =
+    new Date().toLocaleDateString('fr-FR', { weekday: 'short', day: 'numeric', month: 'short' });
+}
+tick(); setInterval(tick, 1000);
+
+// ---------- Batterie (envoyée par veille.py, ou via l'API du navigateur si dispo) ----------
+let batterie = null;
+function setBatterie(niveau, enCharge) {
+  batterie = { niveau: Math.round(niveau), enCharge };
+  const el = document.getElementById('batt');
+  el.style.display = 'flex';
+  el.classList.toggle('charge', enCharge);
+  el.classList.toggle('faible', !enCharge && niveau <= 20);
+  document.getElementById('battBarre').style.width = batterie.niveau + '%';
+  document.getElementById('battTxt').textContent = batterie.niveau + '%' + (enCharge ? '+' : '');
+}
+if (navigator.getBattery && !params.has('capture')) navigator.getBattery().then(b => {
+  const maj = () => setBatterie(b.level * 100, b.charging);
+  maj(); b.addEventListener('levelchange', maj); b.addEventListener('chargingchange', maj);
+}).catch(() => {});
+
+const corners = [
+  { left: '3vw', top: '4vh' }, { right: '3vw', top: '4vh' },
+  { right: '3vw', bottom: '30vh' }, { left: '3vw', bottom: '30vh' },
+];
+let ci = 0;
+function moveSave() {
+  saveEl.style.opacity = 0;
+  setTimeout(() => {
+    const c = corners[ci++ % corners.length];
+    for (const k of ['left', 'right', 'top', 'bottom']) saveEl.style[k] = c[k] ?? 'auto';
+    saveEl.style.opacity = 1;
+  }, 1300);
+}
+moveSave(); setInterval(moveSave, 45000);
+
+// ---------- Boîte de dialogue ----------
+const LINES = [
+  "Le PC se repose. Rien ne bouge... à part tout le reste.",
+  "Tu sens l'ordinateur te regarder d'un air endormi.",
+  "Bouge la souris pour retourner dans le Monde Lumineux.",
+  "Une étoile jaune scintille. Tu as l'impression que ta session est sauvegardée.",
+  "Il est {h}. Le temps passe différemment dans le Monde Sombre.",
+  "(Ton âme rebondit contre les bords de l'écran. Elle a l'air de s'amuser.)",
+  "Le ventilateur ronronne. Tu te sens rempli de... veille.",
+  "Quelque part, quelqu'un a laissé une tasse de café refroidir.",
+  "L'écran attend. L'écran a toujours attendu.",
+];
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+let derniere = '';
+async function dialogLoop() {
+  await sleep(4000);
+  for (;;) {
+    let line;
+    do { line = pick(Math.random() < .5 ? scene.lines : LINES); } while (line === derniere);
+    derniere = line;
+    line = line.replace('{h}', hhmm());
+    txtEl.textContent = '';
+    dlgEl.style.opacity = 1;
+    await sleep(900);
+    for (const ch of line) {
+      txtEl.textContent += ch;
+      await sleep('.,!?'.includes(ch) ? 220 : 38);
+    }
+    await sleep(6000);
+    dlgEl.style.opacity = 0;
+    await sleep(rand(9000, 15000));
+  }
+}
+// Fait avancer l'animation avant de la figer (et attend un feu d'artifice dans la scène de fête)
+function rechauffer() {
+  let i = 0;
+  for (; i < 240 || (scene.etincelles && scene.etincelles.length < 60 && i < 900); i++) scene.draw(i / 30, 1 / 30);
+  tFige = i / 30;
+}
+// ?capture : affiche tout immédiatement, sans transitions (pour faire des captures d'écran)
+if (params.has('capture')) {
+  const st = document.createElement('style');
+  st.textContent = '*{transition:none!important}';
+  document.head.appendChild(st);
+  fonduEl.style.opacity = 0;
+  saveEl.style.opacity = 1;
+  setBatterie(64, false);
+  rechauffer();
+  txtEl.textContent = scene.lines[0];
+  dlgEl.style.opacity = 1;
+} else {
+  dialogLoop();
+}
+</script>
+</body>
+</html>
